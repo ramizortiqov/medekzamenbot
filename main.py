@@ -28,23 +28,32 @@ async def startup():
 
 @app.get("/api/files")
 async def get_files(request: Request):
-    async with app.state.db.acquire() as conn:
-        rows = await conn.fetch("SELECT id, file_name, file_id FROM materials ORDER BY created_at DESC LIMIT 50")
-    
-    files = []
-    for row in rows:
-        file_id = row["file_id"]
-        name = row["file_name"] or "Без названия"
-        
-        try:
-            r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}")
-            data = r.json()
-            if "result" not in data:
-                continue
-            file_path = data["result"]["file_path"]
-            download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-            files.append({"name": name, "url": download_url})
-        except Exception as e:
-            print(f"Ошибка получения file_path: {e}")
-    
-    return files
+    try:
+        async with app.state.db.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, file_name, file_id FROM materials ORDER BY created_at DESC LIMIT 50"
+            )
+
+        files = []
+        for row in rows:
+            file_id = row["file_id"]
+            name = row["file_name"] or "Без названия"
+
+            try:
+                r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}")
+                data = r.json()
+                if "result" not in data:
+                    continue
+                file_path = data["result"]["file_path"]
+                download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+                files.append({"name": name, "url": download_url})
+            except Exception as e:
+                print(f"Ошибка получения file_path: {e}")
+
+        return files
+
+    except Exception as e:
+        import traceback
+        print("🔥 Ошибка в /api/files:", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
