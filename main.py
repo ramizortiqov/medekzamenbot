@@ -31,16 +31,25 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     """Создание пула подключений к PostgreSQL при запуске сервера."""
+    
     if not POSTGRES_DSN:
+        # FastAPI не запустится, если нет DSN
+        print("❌ POSTGRES_DSN environment variable is not set. Cannot connect to database.")
         raise ValueError("POSTGRES_DSN environment variable is not set.")
+    
     try:
-        app.state.db = await asyncpg.create_pool(POSTGRES_DSN)
+        # Устанавливаем таймаут подключения 5 секунд.
+        app.state.db = await asyncpg.create_pool(
+            POSTGRES_DSN,
+            timeout=5.0
+        )
         print("✅ Database connected")
     except Exception as e:
-        print(f"❌ Database connection failed: {e}")
-        # Вы можете остановить приложение, если соединение с БД критично
-        # raise Exception("Failed to connect to database.")
-
+        # ⚠️ КЛЮЧЕВОЙ МОМЕНТ: Логируем точную ошибку подключения
+        print(f"❌ Database connection failed. CRITICAL ERROR: {e}")
+        # Перебрасываем исключение. FastAPI завершит инициализацию с ошибкой 
+        # и не будет принимать запросы, что лучше, чем 500.
+        raise Exception(f"Failed to connect to database on startup: {e}")
 
 # -------------------- 3. ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ --------------------
 
@@ -70,6 +79,9 @@ async def fetch_file_url(client: httpx.AsyncClient, file_id: str, file_name: str
 # -------------------- 4. ОСНОВНОЙ ЭНДПОИНТ --------------------
 
 @app.get("/api/files")
+if not hasattr(app.state, 'db'):
+        print("❌ app.state.db is missing. Startup failed.")
+        raise HTTPException(status_code=500, detail="Database connection pool is not initialized. Check startup logs.")
 # Добавляем Optional[str] = None для приема параметра 'tag'
 async def get_files(request: Request, tag: Optional[str] = None):
     
@@ -123,4 +135,5 @@ async def get_files(request: Request, tag: Optional[str] = None):
         files = [res for res in results if res is not None]
     
     return files
+
 
