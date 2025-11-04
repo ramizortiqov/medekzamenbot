@@ -53,33 +53,14 @@ async def fetch_file_url(client: httpx.AsyncClient, file_id: str, file_name: str
         
     return None
 
+# ... (весь импортированный код, включая httpx, asyncpg и т.д.) ...
+
 @app.get("/api/files")
-async def get_files(request: Request):
-    
-    db_rows = []
-    async with app.state.db.acquire() as conn:
-        # 4. Оптимизировали запрос: добавили WHERE file_id IS NOT NULL
-        db_rows = await conn.fetch(
-            "SELECT id, file_name, file_id FROM materials "
-            "WHERE file_id IS NOT NULL " # <-- Важное добавление
-            "ORDER BY created_at DESC LIMIT 50"
-        )
-    
-    files = []
-    
-    # 5. Используем httpx.AsyncClient для всех запросов
-    async with httpx.AsyncClient() as client:
-        # 6. Создаем список задач (coroutine) для параллельного выполнения
-        tasks = []
-        for row in db_rows:
-            tasks.append(
-                fetch_file_url(client, row["file_id"], row["file_name"])
-            )
-        
-        # 7. Запускаем все задачи одновременно и ждем их завершения
-        results = await asyncio.gather(*tasks)
-        
-        # 8. Фильтруем пустые результаты (None), если были ошибки
-        files = [res for res in results if res is not None]
-    
-    return files
+async def get_files(request: Request, tag: Optional[str] = None):
+    # 1. Проверяем, что запрос доходит досюда и возвращает статический ответ
+    return [
+        {"name": "Тестовый файл 1", "url": "http://test.url/1"},
+        {"name": "Тестовый файл 2", "url": "http://test.url/2"}
+    ]
+
+# ... (Временное закомментирование всего, что использует app.state.db и httpx) ...
