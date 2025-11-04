@@ -24,13 +24,25 @@ app.add_middleware(
 
 # -------------------- DB HANDLER --------------------
 
+# ⚠️ ДОБАВЛЕНО: Глобальная блокировка для защиты инициализации пула БД
+db_pool_lock = asyncio.Lock()
+
 async def get_db():
     """Создаёт пул подключений (ленивая инициализация) или возвращает существующий."""
     if not POSTGRES_DSN:
         print("❌ POSTGRES_DSN не установлен. Проверьте переменные окружения.")
         raise ConnectionError("POSTGRES_DSN not configured.")
         
-    if not hasattr(app.state, "db"):
+    # Быстрая проверка: если пул уже есть, сразу возвращаем
+    if hasattr(app.state, "db"):
+        return app.state.db
+    
+    # Медленная проверка и инициализация: защищаем блокировкой
+    async with db_pool_lock:
+        # Проверяем ещё раз после получения блокировки (на случай, если его создал другой конкурент)
+        if hasattr(app.state, "db"):
+            return app.state.db
+
         try:
             # Пытаемся создать пул, устанавливаем таймаут подключения
             app.state.db = await asyncpg.create_pool(POSTGRES_DSN, timeout=5.0) 
