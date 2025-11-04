@@ -1,61 +1,109 @@
 import os
 import requests
 import asyncpg
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
+from typing import List, Optional
 
 load_dotenv()
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-POSTGRES_DSN = os.getenv("POSTGRES_DSN")  # <--- обязательно проверь, что эта переменная есть в Vercel
+POSTGRES_DSN= os.getenv("POSTGRES_DSN")
+
+if not BOT_TOKEN or not POSTGRES_DSN:
+    raise ValueError("BOT_TOKEN and POSTGRES_DSN must be set in .env file")
 
 app = FastAPI()
 
+# Убедитесь, что здесь указан домен вашего фронтенда на Vercel
+# Можно добавить и localhost для локальной разработки
+allowed_origins = [
+    "https://mini-app-mauve-alpha.vercel.app",
+    "http://localhost:5500", # Пример для Live Server в VS Code
+    "http://127.0.0.1:5500",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://mini-app-mauve-alpha.vercel.app"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET"],
     allow_headers=["*"],
 )
 
-async def get_db():
-    """Создаёт пул подключений, если ещё не создан"""
-    if not hasattr(app.state, "db"):
+@app.on_event("startup")
+async def startup():
+    """Инициализация пула подключений к базе данных при старте приложения."""
+    try:
         app.state.db = await asyncpg.create_pool(POSTGRES_DSN)
-        print("✅ Database pool initialized")
-    return app.state.db
-
+        print("✅ Database pool connected successfully.")
+    except Exception as e:
+        print(f"❌ Failed to connect to database: {e}")
+        # Вы можете остановить запуск, если база недоступна
+        raise HTTPException(status_code=500, detail="Database connection failed")
 
 @app.get("/api/files")
-async def get_files(request: Request):
-    try:
-        db = await get_db()
-        async with db.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT id, file_name, file_id FROM materials ORDER BY created_at DESC LIMIT 50"
-            )
+async def get_files_by_tag(tag: str):
+    """
+    Получает материалы из базы данных, отфильтрованные по тегу.
+    Формирует прямые ссылки на файлы Telegram и возвращает данные
+    в формате, совместимом с фронтендом.
+    """
+    if not tag:
+        raise HTTPException(status_code=400, detail="Tag parameter is required")
 
-        files = []
-        for row in rows:
-            file_id = row["file_id"]
-            name = row["file_name"] or "Без названия"
+    print(f"🔍 Received request for tag: {tag}")
 
+    async with app.state.db.acquire() as conn:
+        # 1. SQL-запрос теперь выбирает ВСЕ нужные поля и фильтрует по тегу
+        rows = await conn.fetch(
+            "SELECT id, tag, type, file_name, file_id, caption FROM materials WHERE tag = $1 ORDER BY id",
+            tag
+        )
+
+    if not rows:
+        print(f"✅ No materials found for tag: {tag}")
+        return [] # Возвращаем пустой массив, если ничего не найдено
+
+    materials = []
+    for row in rows:
+        file_url = None
+        file_id = row["file_id"]
+        material_type = row["type"]
+
+        # 2. Получаем ссылку на файл, только если это не просто текст
+        if material_type != 'text' and file_id:
             try:
-                r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}")
-                data = r.json()
-                if "result" not in data:
-                    continue
-                file_path = data["result"]["file_path"]
-                download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-                files.append({"name": name, "url": download_url})
+                # Используем сессию для улучшения производительности
+                with requests.Session() as s:
+                    r = s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}")
+                    r.raise_for_status() # Проверка на ошибки HTTP (4xx, 5xx)
+                    data = r.json()
+
+                if data.get("ok"):
+                    file_path = data["result"]["file_path"]
+                    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+                else:
+                    print(f"⚠️ Telegram API error for file_id {file_id}: {data.get('description')}")
+            except requests.RequestException as e:
+                print(f"❌ HTTP Error getting file_path for {file_id}: {e}")
             except Exception as e:
-                print(f"Ошибка получения file_path: {e}")
+                print(f"❌ Unexpected error processing file_id {file_id}: {e}")
 
-        return files
+        # 3. Собираем объект в формате, который ожидает фронтенд
+        materials.append({
+            "id": row["id"],
+            "tag": row["tag"],
+            "type": material_type,
+            "file_url": file_url,
+            "file_name": row["file_name"],
+            "caption": row["caption"]
+        })
 
-    except Exception as e:
-        import traceback
-        print("🔥 Ошибка в /api/files:", traceback.format_exc())
-        raise HTTPException(status_code=500, detail=str(e))
+    print(f"✅ Found and processed {len(materials)} materials for tag: {tag}")
+    return materials
+
+# Добавим корневой эндпоинт для проверки, что API работает
+@app.get("/")
+def read_root():
+    return {"status": "MedEkzamen API is running!"}
