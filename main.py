@@ -1,23 +1,17 @@
 import os
+import requests
 import asyncpg
-import httpx # Асинхронный HTTP-клиент
-import asyncio # Для параллельных запросов к Telegram
 from fastapi import FastAPI, HTTPException, Request
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
 
-# -------------------- 1. НАСТРОЙКА --------------------
-
-# Загружаем переменные окружения из .env
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-POSTGRES_DSN = os.getenv("POSTGRES_DSN")
 
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+POSTGRES_DSN = os.getenv("POSTGRES_DSN")  # <--- обязательно проверь, что эта переменная есть в Vercel
 
 app = FastAPI()
 
-# Разрешаем фронтенду (Vercel Mini App) обращаться к API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://mini-app-mauve-alpha.vercel.app"],
@@ -26,114 +20,42 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------------------- 2. ПОДКЛЮЧЕНИЕ К БД --------------------
+async def get_db():
+    """Создаёт пул подключений, если ещё не создан"""
+    if not hasattr(app.state, "db"):
+        app.state.db = await asyncpg.create_pool(POSTGRES_DSN)
+        print("✅ Database pool initialized")
+    return app.state.db
 
-@app.on_event("startup")
-async def startup():
-    """Создание пула подключений к PostgreSQL при запуске сервера."""
-    
-    if not POSTGRES_DSN:
-        # FastAPI не запустится, если нет DSN
-        print("❌ POSTGRES_DSN environment variable is not set. Cannot connect to database.")
-        raise ValueError("POSTGRES_DSN environment variable is not set.")
-    
-    try:
-        # Устанавливаем таймаут подключения 5 секунд.
-        app.state.db = await asyncpg.create_pool(
-            POSTGRES_DSN,
-            timeout=5.0
-        )
-        print("✅ Database connected")
-    except Exception as e:
-        # ⚠️ КЛЮЧЕВОЙ МОМЕНТ: Логируем точную ошибку подключения
-        print(f"❌ Database connection failed. CRITICAL ERROR: {e}")
-        # Перебрасываем исключение. FastAPI завершит инициализацию с ошибкой 
-        # и не будет принимать запросы, что лучше, чем 500.
-        raise Exception(f"Failed to connect to database on startup: {e}")
-
-# -------------------- 3. ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ --------------------
-
-async def fetch_file_url(client: httpx.AsyncClient, file_id: str, file_name: str, bot_token: str) -> dict | None:
-    """Асинхронно получает URL файла из Telegram с помощью httpx."""
-    if not file_id:
-        return None
-        
-    try:
-        # Используем httpx.AsyncClient
-        r = await client.get(f"https://api.telegram.org/bot{bot_token}/getFile?file_id={file_id}")
-        r.raise_for_status() # Проверка на HTTP-ошибки (4xx, 5xx)
-        
-        data = r.json()
-        
-        if data.get("ok") and "result" in data:
-            file_path = data["result"]["file_path"]
-            download_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
-            return {"name": file_name or "Без названия", "url": download_url}
-            
-    except Exception as e:
-        # Логируем ошибку, чтобы не блокировать другие файлы
-        print(f"Ошибка получения file_path для file_id {file_id}: {e}")
-        
-    return None
-
-# -------------------- 4. ОСНОВНОЙ ЭНДПОИНТ --------------------
 
 @app.get("/api/files")
-if not hasattr(app.state, 'db'):
-        print("❌ app.state.db is missing. Startup failed.")
-        raise HTTPException(status_code=500, detail="Database connection pool is not initialized. Check startup logs.")
-# Добавляем Optional[str] = None для приема параметра 'tag'
-async def get_files(request: Request, tag: Optional[str] = None):
-    
-    if not BOT_TOKEN:
-        raise HTTPException(status_code=500, detail="BOT_TOKEN is not configured.")
-
-    db_rows = []
-    
-    # --- Динамическое построение SQL-запроса ---
-    sql_query = "SELECT id, file_name, file_id FROM materials WHERE file_id IS NOT NULL"
-    sql_args = []
-    
-    # ФИЛЬТРАЦИЯ ПО ТЕГУ
-    if tag:
-        # Используем параметризованный запрос для безопасности (asyncpg использует $1, $2, ...)
-        sql_query += " AND tag = $1"
-        sql_args.append(tag)
-    
-    sql_query += " ORDER BY created_at DESC LIMIT 50"
-    # ------------------------------------------
-
+async def get_files(request: Request):
     try:
-        async with app.state.db.acquire() as conn:
-            # Выполняем запрос с аргументами
-            db_rows = await conn.fetch(sql_query, *sql_args)
-    except asyncpg.exceptions.PostgresError as e: # <-- Ловим конкретную ошибку Postgres
-        # ВАЖНО: Вместо generic-сообщения возвращаем текст ошибки
-        print(f"❌ КРИТИЧЕСКАЯ ОШИБКА БД: {e}")
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Database query failed. Error: {e}" # <-- Возвращаем текст ошибки
-        )
-    except Exception as e:
-        print(f"❌ Ошибка при выполнении запроса к БД: {e}")
-        raise HTTPException(status_code=500, detail="Database query failed. Check Vercel logs for connection error.")
-    
-    # --- Параллельное выполнение запросов к Telegram ---
-    # Создаем асинхронный клиент для всех запросов
-    async with httpx.AsyncClient(timeout=10.0) as client: 
-        tasks = []
-        for row in db_rows:
-            # Создаем задачу для каждого файла
-            tasks.append(
-                fetch_file_url(client, row["file_id"], row["file_name"], BOT_TOKEN)
+        db = await get_db()
+        async with db.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, file_name, file_id FROM materials ORDER BY created_at DESC LIMIT 50"
             )
-        
-        # Запускаем все задачи одновременно и ждем их завершения
-        results = await asyncio.gather(*tasks)
-        
-        # Фильтруем пустые результаты (None), которые вернулись при ошибке
-        files = [res for res in results if res is not None]
-    
-    return files
 
+        files = []
+        for row in rows:
+            file_id = row["file_id"]
+            name = row["file_name"] or "Без названия"
 
+            try:
+                r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}")
+                data = r.json()
+                if "result" not in data:
+                    continue
+                file_path = data["result"]["file_path"]
+                download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+                files.append({"name": name, "url": download_url})
+            except Exception as e:
+                print(f"Ошибка получения file_path: {e}")
+
+        return files
+
+    except Exception as e:
+        import traceback
+        print("🔥 Ошибка в /api/files:", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
