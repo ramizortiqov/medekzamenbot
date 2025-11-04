@@ -6,13 +6,12 @@ from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-POSTGRES_DSN= os.getenv("POSTGRES_DSN")
 
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+POSTGRES_DSN = os.getenv("POSTGRES_DSN")  # <--- обязательно проверь, что эта переменная есть в Vercel
 
 app = FastAPI()
 
-# Разрешаем фронту (Vercel) обращаться к API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://mini-app-mauve-alpha.vercel.app"],
@@ -21,15 +20,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.on_event("startup")
-async def startup():
-    app.state.db = await asyncpg.create_pool(POSTGRES_DSN)
-    print("✅ Database connected")
+async def get_db():
+    """Создаёт пул подключений, если ещё не создан"""
+    if not hasattr(app.state, "db"):
+        app.state.db = await asyncpg.create_pool(POSTGRES_DSN)
+        print("✅ Database pool initialized")
+    return app.state.db
+
 
 @app.get("/api/files")
 async def get_files(request: Request):
     try:
-        async with app.state.db.acquire() as conn:
+        db = await get_db()
+        async with db.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT id, file_name, file_id FROM materials ORDER BY created_at DESC LIMIT 50"
             )
@@ -56,4 +59,3 @@ async def get_files(request: Request):
         import traceback
         print("🔥 Ошибка в /api/files:", traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
-
