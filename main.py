@@ -95,12 +95,16 @@ async def get_files(request: Request, tag: Optional[str] = None):
         async with app.state.db.acquire() as conn:
             # Выполняем запрос с аргументами
             db_rows = await conn.fetch(sql_query, *sql_args)
+    except asyncpg.exceptions.PostgresError as e: # <-- Ловим конкретную ошибку Postgres
+        # ВАЖНО: Вместо generic-сообщения возвращаем текст ошибки
+        print(f"❌ КРИТИЧЕСКАЯ ОШИБКА БД: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Database query failed. Error: {e}" # <-- Возвращаем текст ошибки
+        )
     except Exception as e:
         print(f"❌ Ошибка при выполнении запроса к БД: {e}")
-        raise HTTPException(status_code=500, detail="Database query failed.")
-
-
-    files = []
+        raise HTTPException(status_code=500, detail="Database query failed. Check Vercel logs for connection error.")
     
     # --- Параллельное выполнение запросов к Telegram ---
     # Создаем асинхронный клиент для всех запросов
@@ -119,3 +123,4 @@ async def get_files(request: Request, tag: Optional[str] = None):
         files = [res for res in results if res is not None]
     
     return files
+
