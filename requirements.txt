@@ -1,5 +1,5 @@
-fastapi
-uvicorn
+fastapi>=0.104.0
+uvicorn[standard]
 asyncpg
 python-dotenv
 requests
