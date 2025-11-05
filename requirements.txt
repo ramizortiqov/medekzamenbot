@@ -1,8 +1,1 @@
-fastapi>=0.104.0
-uvicorn[standard]
-asyncpg
-python-dotenv
-requests
-aiogram
-httpx
-mangum
+requests==2.31.0
