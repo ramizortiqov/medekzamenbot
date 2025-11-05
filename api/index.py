@@ -1,207 +1,213 @@
 import os
 import requests
 import asyncpg
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
-from contextlib import asynccontextmanager
 
 # Переменные окружения
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-POSTGRES_DSN = os.environ.get("POSTGRES_DSN")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+POSTGRES_DSN = os.environ.get("POSTGRES_DSN", "")
 
-# <<<< ГЛОБАЛЬНЫЙ ПУЛ ПОДКЛЮЧЕНИЙ (создаётся при первом запросе)
-db_pool = None
+# FastAPI приложение
+app = FastAPI(title="MedEkzamen API", version="1.0.0")
 
-async def get_db_pool():
-    """Ленивая инициализация пула подключений к БД"""
-    global db_pool
-    if db_pool is None:
-        if not POSTGRES_DSN:
-            raise Exception("POSTGRES_DSN not set in environment variables")
-        try:
-            db_pool = await asyncpg.create_pool(
-                POSTGRES_DSN,
-                min_size=1,
-                max_size=3,
-                command_timeout=60
-            )
-            print("✅ Database pool created")
-        except Exception as e:
-            print(f"❌ Failed to create database pool: {e}")
-            raise
-    return db_pool
-
-# <<<< LIFESPAN CONTEXT (правильный способ для современного FastAPI)
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
-    print("🚀 Starting up...")
-    try:
-        await get_db_pool()
-    except Exception as e:
-        print(f"⚠️ Warning: Could not initialize DB pool on startup: {e}")
-    
-    yield
-    
-    # Shutdown
-    print("🛑 Shutting down...")
-    global db_pool
-    if db_pool:
-        await db_pool.close()
-        print("🔌 Database pool closed")
-
-# Создаём приложение с lifespan
-app = FastAPI(title="MedEkzamen API", version="1.0.0", lifespan=lifespan)
-
-# CORS
+# CORS - разрешаем запросы с фронтенда
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # В продакшене укажите конкретные домены
+    allow_origins=["*"],  # В продакшене укажите конкретный домен
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+
+async def get_db_connection():
+    """Создаёт подключение к PostgreSQL"""
+    if not POSTGRES_DSN:
+        raise HTTPException(status_code=500, detail="POSTGRES_DSN not configured")
+    try:
+        conn = await asyncpg.connect(POSTGRES_DSN, timeout=10)
+        return conn
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Database connection failed: {str(e)}")
+
+def get_telegram_file_url(file_id: str) -> Optional[str]:
+    """Получает прямую ссылку на файл через Telegram Bot API"""
+    if not BOT_TOKEN or not file_id:
+        return None
+    try:
+        response = requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+            params={"file_id": file_id},
+            timeout=5
+        )
+        data = response.json()
+        if data.get("ok") and "result" in data:
+            file_path = data["result"]["file_path"]
+            return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+    except Exception as e:
+        print(f"Error getting file URL: {e}")
+    return None
+
 # ==================== МАРШРУТЫ ====================
 
 @app.get("/")
 async def root():
-    """Проверка работоспособности API"""
-    global db_pool
+    """Корневой эндпоинт - проверка работоспособности"""
     return {
         "status": "ok",
         "message": "MedEkzamen API is running",
-        "bot_token_set": bool(BOT_TOKEN),
-        "postgres_dsn_set": bool(POSTGRES_DSN),
-        "db_pool_active": db_pool is not None,
+        "version": "1.0.0",
+        "config": {
+            "bot_token": "✅ configured" if BOT_TOKEN else "❌ missing",
+            "database": "✅ configured" if POSTGRES_DSN else "❌ missing"
+        },
         "endpoints": {
+            "health": "/api/health",
             "materials": "/api/materials/{tag}?course=1&group_lang=ru",
             "files": "/api/files"
         }
     }
 
+@app.get("/api/health")
+async def health_check():
+    """Проверка подключения к базе данных"""
+    try:
+        conn = await asyncpg.connect(POSTGRES_DSN, timeout=5)
+        version = await conn.fetchval("SELECT version()")
+        await conn.close()
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "postgres_version": version.split(",")[0]
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "database": "disconnected",
+            "error": str(e)
+        }
+
 @app.get("/api/materials/{tag}")
 async def get_materials_by_tag(
     tag: str,
-    course: Optional[int] = Query(None),
-    group_lang: Optional[str] = Query(None)
+    course: Optional[int] = Query(None, description="Курс (1-6)"),
+    group_lang: Optional[str] = Query(None, description="Язык группы (ru/tj)")
 ):
-    """Получает материалы по тегу с фильтрацией"""
+    """
+    Получает материалы по тегу с фильтрацией
     
-    # <<<< ПОЛУЧАЕМ ПУЛ (создастся автоматически, если ещё нет)
+    Примеры:
+    - /api/materials/chem1?course=1&group_lang=ru
+    - /api/materials/lecture_bio1?course=1&group_lang=tj
+    - /api/materials/summary1.1?course=1
+    """
+    
+    conn = await get_db_connection()
+    
     try:
-        pool = await get_db_pool()
+        # Строим SQL запрос с фильтрами
+        query = "SELECT * FROM materials WHERE tag = $1"
+        params = [tag]
+        
+        # Фильтр по курсу (материал доступен если course IS NULL или совпадает)
+        if course is not None:
+            query += f" AND (course IS NULL OR course = ${len(params)+1})"
+            params.append(course)
+        
+        # Фильтр по языку группы
+        if group_lang:
+            query += f" AND (group_lang IS NULL OR group_lang = ${len(params)+1})"
+            params.append(group_lang)
+        
+        query += " ORDER BY created_at ASC"
+        
+        # Выполняем запрос
+        rows = await conn.fetch(query, *params)
+        
+        # Формируем список материалов
+        materials = []
+        for row in rows:
+            material = {
+                "id": row["id"],
+                "tag": row["tag"],
+                "type": row["type"],
+                "file_id": row["file_id"],
+                "file_name": row["file_name"],
+                "caption": row["caption"],
+                "course": row["course"],
+                "group_lang": row["group_lang"],
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                "download_url": None
+            }
+            
+            # Получаем прямую ссылку на файл, если есть file_id
+            if row["file_id"]:
+                material["download_url"] = get_telegram_file_url(row["file_id"])
+            
+            materials.append(material)
+        
+        return {
+            "success": True,
+            "materials": materials,
+            "count": len(materials),
+            "filters": {
+                "tag": tag,
+                "course": course,
+                "group_lang": group_lang
+            }
+        }
+    
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Database unavailable: {str(e)}")
-    
-    # Строим запрос
-    query = "SELECT * FROM materials WHERE tag = $1"
-    params = [tag]
-    
-    if course is not None:
-        query += f" AND (course IS NULL OR course = ${len(params)+1})"
-        params.append(course)
-    
-    if group_lang:
-        query += f" AND (group_lang IS NULL OR group_lang = ${len(params)+1})"
-        params.append(group_lang)
-    
-    query += " ORDER BY created_at"
-    
-    # Выполняем запрос
-    try:
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(query, *params)
-    except Exception as e:
-        print(f"❌ Database query error: {e}")
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
     
-    # Формируем ответ
-    materials = []
-    for row in rows:
-        material = {
-            "id": row["id"],
-            "tag": row["tag"],
-            "type": row["type"],
-            "file_id": row["file_id"],
-            "file_name": row["file_name"],
-            "caption": row["caption"],
-            "course": row["course"],
-            "group_lang": row["group_lang"],
-            "download_url": None
-        }
-        
-        # Получаем URL файла через Telegram Bot API
-        if row["file_id"] and BOT_TOKEN:
-            try:
-                r = requests.get(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
-                    params={"file_id": row["file_id"]},
-                    timeout=5
-                )
-                data = r.json()
-                if data.get("ok") and "result" in data:
-                    file_path = data["result"]["file_path"]
-                    material["download_url"] = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-            except Exception as e:
-                print(f"⚠️ Error getting file URL for {row['file_id']}: {e}")
-        
-        materials.append(material)
-    
-    print(f"✅ Found {len(materials)} materials for tag={tag}, course={course}, group={group_lang}")
-    return {"materials": materials, "count": len(materials)}
+    finally:
+        await conn.close()
 
 @app.get("/api/files")
-async def get_files():
-    """Получает список всех файлов (для отладки)"""
+async def get_all_files():
+    """Получает список всех файлов из БД (для отладки)"""
+    
+    conn = await get_db_connection()
     
     try:
-        pool = await get_db_pool()
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Database unavailable: {str(e)}")
+        rows = await conn.fetch(
+            """
+            SELECT id, file_name, file_id, tag, type, course, group_lang, created_at 
+            FROM materials 
+            WHERE file_id IS NOT NULL 
+            ORDER BY created_at DESC 
+            LIMIT 100
+            """
+        )
+        
+        files = []
+        for row in rows:
+            files.append({
+                "id": row["id"],
+                "name": row["file_name"] or "Без названия",
+                "tag": row["tag"],
+                "type": row["type"],
+                "course": row["course"],
+                "group_lang": row["group_lang"],
+                "file_id": row["file_id"],
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None
+            })
+        
+        return {
+            "success": True,
+            "files": files,
+            "count": len(files)
+        }
     
-    try:
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT id, file_name, file_id, tag, type FROM materials WHERE file_id IS NOT NULL ORDER BY created_at DESC LIMIT 50"
-            )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
     
-    files = []
-    for row in rows:
-        file_info = {
-            "id": row["id"],
-            "name": row["file_name"] or "Без названия",
-            "tag": row["tag"],
-            "type": row["type"],
-            "file_id": row["file_id"]
-        }
-        
-        # Опционально получаем URL
-        if BOT_TOKEN:
-            try:
-                r = requests.get(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
-                    params={"file_id": row["file_id"]},
-                    timeout=5
-                )
-                data = r.json()
-                if data.get("ok") and "result" in data:
-                    file_path = data["result"]["file_path"]
-                    file_info["url"] = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-            except Exception as e:
-                print(f"⚠️ Error getting file URL: {e}")
-        
-        files.append(file_info)
-    
-    return {"files": files, "count": len(files)}
+    finally:
+        await conn.close()
 
-# <<<< ОБРАБОТЧИК ДЛЯ VERCEL SERVERLESS
-try:
-    from mangum import Mangum
-    handler = Mangum(app, lifespan="off")  # lifespan управляется вручную
-except ImportError:
-    # Если mangum не установлен (локальная разработка)
-    handler = None
+# ==================== VERCEL SERVERLESS HANDLER ====================
+from mangum import Mangum
+handler = Mangum(app, lifespan="off")
