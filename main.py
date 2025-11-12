@@ -162,7 +162,7 @@ async def root():
         "endpoints": {
             "health": "/api/health",
             "materials": "/api/materials/{tag}?course=1&group_lang=ru",
-            "files": "/api/files"
+            "files": "/api/files",
             "get_user": "/api/users/{user_id}",
             "create_user": "/api/users/ (POST)"
         }
@@ -270,4 +270,5 @@ async def get_files():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
