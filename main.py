@@ -188,15 +188,35 @@ async def download_file(material_id: int):
         if file_response.status_code != 200:
             raise HTTPException(status_code=500, detail="Failed to download file")
 
-        # ✅ ПРАВИЛЬНАЯ КОДИРОВКА для кириллицы (RFC 5987)
-        encoded_filename = quote(file_name.encode('utf-8'))
+        # ✅ ВАЖНО: определяем правильный Content-Type
+        content_type = file_response.headers.get("content-type", "application/octet-stream")
+        
+        # Если Content-Type неправильный, определяем по расширению файла
+        if file_name.lower().endswith('.pdf'):
+            content_type = "application/pdf"
+        elif file_name.lower().endswith(('.doc', '.docx')):
+            content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        elif file_name.lower().endswith('.jpg') or file_name.lower().endswith('.jpeg'):
+            content_type = "image/jpeg"
+        elif file_name.lower().endswith('.png'):
+            content_type = "image/png"
+
+        # ✅ Кодируем имя файла для URL
+        encoded_filename = quote(file_name)
+        
+        # ✅ Создаём ASCII-безопасное имя для старых браузеров
+        # Транслитерация для кириллицы
+        import re
+        safe_name = re.sub(r'[^\x00-\x7F]+', '_', file_name)
         
         return StreamingResponse(
             iter([file_response.content]),
-            media_type=file_response.headers.get("content-type", "application/octet-stream"),
+            media_type=content_type,  # ✅ Правильный Content-Type
             headers={
-                # Используем оба формата для совместимости
-                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
+                # ✅ Комбинированный формат для максимальной совместимости
+                "Content-Disposition": f'attachment; filename="{safe_name}"; filename*=UTF-8\'\'{encoded_filename}',
+                "Content-Type": content_type,  # Дублируем для надёжности
+                "Cache-Control": "no-cache",
             }
         )
 
@@ -326,6 +346,7 @@ async def get_files():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
 
