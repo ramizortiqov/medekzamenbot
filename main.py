@@ -153,11 +153,12 @@ def get_file_url(file_id: str) -> Optional[str]:
     return None
 @app.get("/api/download/{material_id}")
 async def download_file(material_id: int):
-    """Скачать файл с правильным именем"""
+    """Download file with correct name"""
     conn = await get_db()
     try:
+        # Получаем file_id И file_name из БД
         material = await conn.fetchrow(
-            "SELECT file_id, file_name, type FROM materials WHERE id = $1",
+            "SELECT file_id, file_name FROM materials WHERE id = $1",
             material_id
         )
 
@@ -165,41 +166,42 @@ async def download_file(material_id: int):
             raise HTTPException(status_code=404, detail="File not found")
 
         file_id = material["file_id"]
-        file_name = material["file_name"] or f"file_{material_id}"
+        # ✅ ВАЖНО: используем file_name из БД
+        file_name = material["file_name"] if material["file_name"] else f"file_{material_id}.pdf"
 
-        try:
-            r = requests.get(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
-                params={"file_id": file_id},
-                timeout=5
-            )
-            data = r.json()
+        # Получаем путь к файлу из Telegram API
+        r = requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+            params={"file_id": file_id},
+            timeout=10
+        )
+        data = r.json()
 
-            if not data.get("ok") or "result" not in data:
-                raise HTTPException(status_code=404, detail="File not found in Telegram")
+        if not data.get("ok"):
+            raise HTTPException(status_code=500, detail="Telegram API error")
 
-            file_path = data["result"]["file_path"]
-            file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        file_path = data["result"]["file_path"]
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
 
-            async with httpx.AsyncClient() as client:
-                response = await client.get(file_url)
+        # Скачиваем файл
+        file_response = requests.get(file_url, timeout=30)
 
-                if response.status_code != 200:
-                    raise HTTPException(status_code=404, detail="Failed to download file")
+        if file_response.status_code != 200:
+            raise HTTPException(status_code=500, detail="Failed to download file")
 
-                content_type = response.headers.get("content-type", "application/octet-stream")
+        # ✅ КЛЮЧЕВОЙ МОМЕНТ: правильный заголовок Content-Disposition
+        return StreamingResponse(
+            iter([file_response.content]),
+            media_type=file_response.headers.get("content-type", "application/octet-stream"),
+            headers={
+                "Content-Disposition": f'attachment; filename="{file_name}"'
+            }
+        )
 
-                return StreamingResponse(
-                    iter([response.content]),
-                    media_type=content_type,
-                    headers={
-                        "Content-Disposition": f'attachment; filename="{file_name}"'
-                    }
-                )
-
-        except httpx.RequestError as e:
-            raise HTTPException(status_code=500, detail=f"Download error: {str(e)}")
-
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
     finally:
         await conn.close()
 @app.get("/")
@@ -322,6 +324,7 @@ async def get_files():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
 
