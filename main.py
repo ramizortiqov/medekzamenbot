@@ -4,6 +4,7 @@ import asyncpg
 from fastapi import FastAPI, HTTPException, Query, Request
 
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from typing import Optional
 import uvicorn
 
@@ -150,7 +151,57 @@ def get_file_url(file_id: str) -> Optional[str]:
     except:
         pass
     return None
+@app.get("/api/download/{material_id}")
+async def download_file(material_id: int):
+    """Скачать файл с правильным именем"""
+    conn = await get_db()
+    try:
+        material = await conn.fetchrow(
+            "SELECT file_id, file_name, type FROM materials WHERE id = $1",
+            material_id
+        )
 
+        if not material or not material["file_id"]:
+            raise HTTPException(status_code=404, detail="File not found")
+
+        file_id = material["file_id"]
+        file_name = material["file_name"] or f"file_{material_id}"
+
+        try:
+            r = requests.get(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+                params={"file_id": file_id},
+                timeout=5
+            )
+            data = r.json()
+
+            if not data.get("ok") or "result" not in data:
+                raise HTTPException(status_code=404, detail="File not found in Telegram")
+
+            file_path = data["result"]["file_path"]
+            file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(file_url)
+
+                if response.status_code != 200:
+                    raise HTTPException(status_code=404, detail="Failed to download file")
+
+                content_type = response.headers.get("content-type", "application/octet-stream")
+
+                return StreamingResponse(
+                    iter([response.content]),
+                    media_type=content_type,
+                    headers={
+                        "Content-Disposition": f'attachment; filename="{file_name}"'
+                    }
+                )
+
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=500, detail=f"Download error: {str(e)}")
+
+    finally:
+        await conn.close()
 @app.get("/")
 async def root():
     return {
@@ -221,7 +272,7 @@ async def get_materials(
                 "course": row["course"],
                 "group_lang": row["group_lang"],
                 "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-                "download_url": get_file_url(row["file_id"]) if row["file_id"] else None
+                "download_url": f"/api/download/{row['id']}" if row["file_id"] else None
             })
         
         return {
@@ -271,6 +322,7 @@ async def get_files():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
 
