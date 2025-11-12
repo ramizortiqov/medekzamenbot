@@ -10,7 +10,7 @@ import uvicorn
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 POSTGRES_DSN = os.environ.get("POSTGRES_DSN", "")
-
+API_BASE_URL = os.environ.get("API_BASE_URL", "")
 # ДОБАВЬТЕ в начало (после импортов)
 ADMIN_USER_IDS = [6720999592, 6520890849]
 app = FastAPI(title="MedEkzamen API", version="1.0.0")
@@ -272,7 +272,7 @@ async def get_materials(
                 "course": row["course"],
                 "group_lang": row["group_lang"],
                 "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-                "download_url": f"/api/download/{row['id']}" if row["file_id"] else None
+                download_url = f"{API_BASE_URL}/api/download/{row['id']}" if row["file_id"] else None
             })
         
         return {
@@ -322,6 +322,7 @@ async def get_files():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
 
