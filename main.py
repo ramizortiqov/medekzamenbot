@@ -2,6 +2,7 @@ import os
 import requests
 import asyncpg
 import httpx
+from urllib.parse import quote
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -156,7 +157,6 @@ async def download_file(material_id: int):
     """Download file with correct name"""
     conn = await get_db()
     try:
-        # Получаем file_id И file_name из БД
         material = await conn.fetchrow(
             "SELECT file_id, file_name FROM materials WHERE id = $1",
             material_id
@@ -166,10 +166,9 @@ async def download_file(material_id: int):
             raise HTTPException(status_code=404, detail="File not found")
 
         file_id = material["file_id"]
-        # ✅ ВАЖНО: используем file_name из БД
         file_name = material["file_name"] if material["file_name"] else f"file_{material_id}.pdf"
 
-        # Получаем путь к файлу из Telegram API
+        # Получаем файл из Telegram
         r = requests.get(
             f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
             params={"file_id": file_id},
@@ -189,12 +188,15 @@ async def download_file(material_id: int):
         if file_response.status_code != 200:
             raise HTTPException(status_code=500, detail="Failed to download file")
 
-        # ✅ КЛЮЧЕВОЙ МОМЕНТ: правильный заголовок Content-Disposition
+        # ✅ ПРАВИЛЬНАЯ КОДИРОВКА для кириллицы (RFC 5987)
+        encoded_filename = quote(file_name.encode('utf-8'))
+        
         return StreamingResponse(
             iter([file_response.content]),
             media_type=file_response.headers.get("content-type", "application/octet-stream"),
             headers={
-                "Content-Disposition": f'attachment; filename="{file_name}"'
+                # Используем оба формата для совместимости
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
             }
         )
 
@@ -324,6 +326,7 @@ async def get_files():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
 
