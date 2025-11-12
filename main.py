@@ -11,7 +11,7 @@ POSTGRES_DSN = os.environ.get("POSTGRES_DSN", "")
 
 # ДОБАВЬТЕ в начало (после импортов)
 ADMIN_USER_IDS = [6720999592, 6520890849]
-
+app = FastAPI(title="MedEkzamen API", version="1.0.0")
 # ДОБАВЬТЕ после функции get_file_url()
 @app.get("/api/users/{user_id}")
 async def get_user(user_id: int):
@@ -118,7 +118,7 @@ async def create_user(request: Request):
     finally:
         await conn.close()
 
-app = FastAPI(title="MedEkzamen API", version="1.0.0")
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -270,5 +270,6 @@ async def get_files():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
