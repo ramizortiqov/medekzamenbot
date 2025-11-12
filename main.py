@@ -9,6 +9,115 @@ import uvicorn
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 POSTGRES_DSN = os.environ.get("POSTGRES_DSN", "")
 
+# ДОБАВЬТЕ в начало (после импортов)
+ADMIN_USER_IDS = [6720999592, 6520890849]
+
+# ДОБАВЬТЕ после функции get_file_url()
+@app.get("/api/users/{user_id}")
+async def get_user(user_id: int):
+    """Получить данные пользователя по Telegram ID"""
+    conn = await get_db()
+    try:
+        user = await conn.fetchrow(
+            """
+            SELECT user_id, username, full_name, course, group_lang, registered_at
+            FROM users
+            WHERE user_id = $1
+            """,
+            user_id
+        )
+
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        return {
+            "user": {
+                "user_id": user["user_id"],
+                "username": user["username"],
+                "full_name": user["full_name"],
+                "course": user["course"],
+                "group_lang": user["group_lang"],
+                "registered_at": user["registered_at"].isoformat() if user["registered_at"] else None,
+                "is_admin": user["user_id"] in ADMIN_USER_IDS
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+    finally:
+        await conn.close()
+
+
+@app.post("/api/users/")
+async def create_user(request: Request):
+    """Зарегистрировать нового пользователя"""
+    conn = await get_db()
+    try:
+        data = await request.json()
+
+        user_id = data.get("user_id")
+        username = data.get("username")
+        full_name = data.get("full_name")
+        course = data.get("course")
+        group_lang = data.get("group_lang")
+
+        # Валидация
+        if not user_id:
+            raise HTTPException(status_code=400, detail="user_id is required")
+        if not full_name:
+            raise HTTPException(status_code=400, detail="full_name is required")
+        if not course or course not in [1, 2, 3, 4, 5, 6]:
+            raise HTTPException(status_code=400, detail="course must be 1-6")
+        if group_lang not in ["ru", "tj"]:
+            raise HTTPException(status_code=400, detail="group_lang must be 'ru' or 'tj'")
+
+        # Вставка или обновление пользователя
+        await conn.execute(
+            """
+            INSERT INTO users (user_id, username, full_name, course, group_lang)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (user_id) DO UPDATE SET
+                username = EXCLUDED.username,
+                full_name = EXCLUDED.full_name,
+                course = EXCLUDED.course,
+                group_lang = EXCLUDED.group_lang
+            """,
+            user_id, username, full_name, course, group_lang
+        )
+
+        # Получаем обновленные данные
+        user = await conn.fetchrow(
+            """
+            SELECT user_id, username, full_name, course, group_lang, registered_at
+            FROM users
+            WHERE user_id = $1
+            """,
+            user_id
+        )
+
+        return {
+            "user": {
+                "user_id": user["user_id"],
+                "username": user["username"],
+                "full_name": user["full_name"],
+                "course": user["course"],
+                "group_lang": user["group_lang"],
+                "registered_at": user["registered_at"].isoformat() if user["registered_at"] else None,
+                "is_admin": user["user_id"] in ADMIN_USER_IDS
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+    finally:
+        await conn.close()
+
 app = FastAPI(title="MedEkzamen API", version="1.0.0")
 
 app.add_middleware(
@@ -54,6 +163,8 @@ async def root():
             "health": "/api/health",
             "materials": "/api/materials/{tag}?course=1&group_lang=ru",
             "files": "/api/files"
+            "get_user": "/api/users/{user_id}",
+            "create_user": "/api/users/ (POST)"
         }
     }
 
@@ -159,3 +270,4 @@ async def get_files():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
